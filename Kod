@@ -1,0 +1,105 @@
+# ==========================================
+# ReversAdd-8
+# Aşama 2 (Kodlama + Test)
+# Aşama 3 (Bilinen Düz Metin Kırılma Saldırısı)
+# ==========================================
+
+BLOCK_SIZE = 8
+MOD = 256
+
+# ---------- Yardımcı ----------
+def addmod(a, b): return (a + b) % MOD
+def submod(a, b): return (a - b) % MOD
+
+def pad(data):
+    pad_len = BLOCK_SIZE - (len(data) % BLOCK_SIZE)
+    return data + bytes([pad_len] * pad_len)
+
+def unpad(data):
+    pad_len = data[-1]
+    return data[:-pad_len]
+
+def fix_key(key):
+    if len(key) >= BLOCK_SIZE:
+        return key[:BLOCK_SIZE]
+    return key.ljust(BLOCK_SIZE, b'\x00')
+
+# ---------- Aşama 2 Fonksiyonları ----------
+def Anahtar_Uret(parola):
+    return fix_key(parola.encode("utf-8"))
+
+def encrypt_block(P, K):
+    T1 = [addmod(P[i], K[i]) for i in range(BLOCK_SIZE)]
+    T2 = list(reversed(T1))
+    C  = [addmod(T2[i], K[i]) for i in range(BLOCK_SIZE)]
+    return C
+
+def decrypt_block(C, K):
+    T2 = [submod(C[i], K[i]) for i in range(BLOCK_SIZE)]
+    T1 = list(reversed(T2))
+    P  = [submod(T1[i], K[i]) for i in range(BLOCK_SIZE)]
+    return P
+
+def Sifrele(duz_metin, anahtar):
+    data = duz_metin.encode("utf-8")
+    data = pad(data)
+    out = []
+    for i in range(0, len(data), BLOCK_SIZE):
+        out.extend(encrypt_block(list(data[i:i+BLOCK_SIZE]), anahtar))
+    return out
+
+def Desifrele(cipher, anahtar):
+    out = []
+    for i in range(0, len(cipher), BLOCK_SIZE):
+        out.extend(decrypt_block(cipher[i:i+BLOCK_SIZE], anahtar))
+    return unpad(bytes(out)).decode("utf-8")
+
+# ---------- Aşama 3: Bilinen Düz Metin Saldırısı ----------
+def known_plaintext_attack(plain, cipher):
+    P = list(plain.encode("utf-8"))[:8]
+    C = cipher[:8]
+
+    print("\n[ KIRILMA SALDIRISI ]")
+    print("Bilinen düz metin:", plain)
+    print("Şifreli blok     :", C)
+
+    S = []
+    for i in range(4):
+        Si = (C[i] - P[7-i]) % 256
+        S.append(Si)
+
+    print("\nAnahtar çift toplamları:")
+    print("K0+K7 =", S[0])
+    print("K1+K6 =", S[1])
+    print("K2+K5 =", S[2])
+    print("K3+K4 =", S[3])
+
+    print("\n➡️ Anahtar uzayı 2^64 → 2^32'ye düşürüldü")
+    print("➡️ Algoritma lineer olduğu için kırılabilir")
+
+# ---------- TESTLER ----------
+print("=== REVERSADD-8 TESTLERİ ===")
+
+duz_metin = "gunaydın"
+anahtar = Anahtar_Uret("sabahdersi")
+
+cipher = Sifrele(duz_metin, anahtar)
+cozulmus = Desifrele(cipher, anahtar)
+
+print("\n[Test 1 – Doğrulama]")
+print("Düz Metin      :", duz_metin)
+print("Anahtar (byte) :", list(anahtar))
+print("Şifreli Metin  :", cipher)
+print("Çözülmüş Metin:", cozulmus)
+
+# Test 2 – Anahtar hassasiyeti
+print("\n[Test 2 – Anahtar Hassasiyeti]")
+bozuk_anahtar = bytearray(anahtar)
+bozuk_anahtar[0] ^= 1  # tek bit değiştir
+try:
+    print("Yanlış anahtar çözümü:", Desifrele(cipher, bytes(bozuk_anahtar)))
+except:
+    print("Yanlış anahtar çözümü: HATA (çığ etkisi)")
+
+# Aşama 3 – Kırılma
+known_plaintext_attack(duz_metin, cipher)
