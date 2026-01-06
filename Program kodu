@@ -1,0 +1,155 @@
+# hybrid_rng.py
+# AES + LFSR + DES + RSA tabanlı hibrit RNG (ödev amaçlı)
+# Gereksinim: pip install pycryptodome
+
+from __future__ import annotations
+import secrets
+from dataclasses import dataclass
+from typing import Tuple
+
+from Crypto.Cipher import AES, DES
+
+# --------------------------
+# RSA/BBS-benzeri seed üretimi
+# --------------------------
+def _rand_odd(bits: int) -> int:
+    x = secrets.randbits(bits) | 1
+    return x
+
+def _make_rsa_like_modulus(bits: int = 512) -> Tuple[int, int, int]:
+    """
+    Ödev amaçlı basit N üretimi.
+    Güvenli RSA üretimi değildir; sadece modüler üs matematiği kullanımı için.
+    """
+    # Burada asal üretimi yapmıyoruz (uzun sürer).
+    # Bunun yerine büyük tek sayılardan N oluşturuyoruz (ödev/demo).
+    p = _rand_odd(bits // 2)
+    q = _rand_odd(bits // 2)
+    N = p * q
+    return N, p, q
+
+def rsa_seed_stream(num_bytes: int, bits: int = 512) -> bytes:
+    """
+    x_{i+1} = x_i^2 mod N tarzı seed stream.
+    """
+    N, _, _ = _make_rsa_like_modulus(bits)
+    x = secrets.randbelow(N - 2) + 2
+
+    out = bytearray()
+    while len(out) < num_bytes:
+        x = pow(x, 2, N)
+        # x'in alt byte'larını al
+        chunk = x.to_bytes((x.bit_length() + 7) // 8, "big", signed=False)
+        # karıştırma için hash yerine basitçe son 32 byte alıyoruz (demo)
+        out.extend(chunk[-32:] if len(chunk) >= 32 else chunk.rjust(32, b"\x00"))
+    return bytes(out[:num_bytes])
+
+# --------------------------
+# LFSR (64-bit)
+# --------------------------
+@dataclass
+class LFSR64:
+    state: int
+
+    def step_bit(self) -> int:
+        """
+        Örnek polinom (tap): x^64 + x^63 + x^61 + x^60 + 1
+        (bit konumları örnek; ders için yeterli)
+        """
+        # taps: 63,62,60,59 (0-index)
+        b = ((self.state >> 63) ^ (self.state >> 62) ^ (self.state >> 60) ^ (self.state >> 59)) & 1
+        self.state = ((self.state << 1) & ((1 << 64) - 1)) | b
+        return b
+
+    def keystream(self, nbytes: int) -> bytes:
+        out = bytearray()
+        cur = 0
+        bits = 0
+        for _ in range(nbytes * 8):
+            cur = (cur << 1) | self.step_bit()
+            bits += 1
+            if bits == 8:
+                out.append(cur & 0xFF)
+                cur = 0
+                bits = 0
+        return bytes(out)
+
+# --------------------------
+# Hibrit RNG
+# --------------------------
+@dataclass
+class HybridRNG:
+    aes_key: bytes      # 16
+    counter: bytearray  # 16 mutable
+    des_key: bytes      # 8
+    lfsr: LFSR64
+
+    @staticmethod
+    def from_rsa_seed() -> "HybridRNG":
+        # RSA stream'den 16+16+8+8 = 48 byte çekiyoruz
+        seed = rsa_seed_stream(48, bits=512)
+
+        aes_key = seed[0:16]
+        counter = bytearray(seed[16:32])
+        des_key = seed[32:40]
+        lfsr_init = int.from_bytes(seed[40:48], "big") or 1
+
+        return HybridRNG(
+            aes_key=aes_key,
+            counter=counter,
+            des_key=des_key,
+            lfsr=LFSR64(state=lfsr_init),
+        )
+
+    def _inc_counter(self):
+        # 128-bit big-endian counter++
+        for i in range(15, -1, -1):
+            self.counter[i] = (self.counter[i] + 1) & 0xFF
+            if self.counter[i] != 0:
+                break
+
+    def next_block16(self) -> bytes:
+        # AES-ECB(counter)
+        aes = AES.new(self.aes_key, AES.MODE_ECB)
+        aes_block = aes.encrypt(bytes(self.counter))
+        self._inc_counter()
+
+        # LFSR keystream
+        lfsr_stream = self.lfsr.keystream(16)
+
+        # XOR mix
+        mixed = bytes([aes_block[i] ^ lfsr_stream[i] for i in range(16)])
+
+        # DES whitening (2 x 8 byte)
+        des = DES.new(self.des_key, DES.MODE_ECB)
+        out = des.encrypt(mixed[:8]) + des.encrypt(mixed[8:])
+        return out
+
+    def next_bytes(self, n: int) -> bytes:
+        out = bytearray()
+        while len(out) < n:
+            out.extend(self.next_block16())
+        return bytes(out[:n])
+
+    def rand_u32(self) -> int:
+        b = self.next_bytes(4)
+        return int.from_bytes(b, "big")
+
+    def randrange(self, low: int, high: int) -> int:
+        if low >= high:
+            raise ValueError("low < high olmalı.")
+        span = high - low
+        return low + (self.rand_u32() % span)
+
+# --------------------------
+# Demo / Test
+# --------------------------
+if __name__ == "__main__":
+    rng = HybridRNG.from_rsa_seed()
+
+    print("=== HybridRNG Demo (AES + LFSR + DES + RSA) ===")
+    print("10 sayı [0,100):")
+    print([rng.randrange(0, 100) for _ in range(10)])
+
+    print("\n16 byte çıktı (hex):")
+    print(rng.next_bytes(16).hex())
